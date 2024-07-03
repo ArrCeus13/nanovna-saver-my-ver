@@ -35,6 +35,7 @@ from NanoVNASaver.Analysis.SimplePeakSearchAnalysis import (
 )
 from NanoVNASaver.Analysis.VSWRAnalysis import VSWRAnalysis
 from NanoVNASaver.Windows.Defaults import make_scrollable
+from NanoVNASaver.Analysis.BScanAnalysis import SParameterAnalysis
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +81,7 @@ class AnalysisWindow(QtWidgets.QWidget):
         self.analysis_list.addItem(
             "MagLoop analysis", MagLoopAnalysis(self.app)
         )
+        self.analysis_list.addItem("S-Parameter analysis", SParameterAnalysis(self.app))
         select_analysis_layout.addRow("Analysis type", self.analysis_list)
         self.analysis_list.currentIndexChanged.connect(self.updateSelection)
 

@@ -18,6 +18,7 @@
 #  along with this program.  If not, see <https://www.gnu.org/licenses/>.
 import logging
 from time import sleep
+import threading
 
 import numpy as np
 from PyQt6 import QtCore, QtWidgets
@@ -27,8 +28,45 @@ from NanoVNASaver.Calibration import correct_delay
 from NanoVNASaver.RFTools import Datapoint
 from NanoVNASaver.Settings.Sweep import Sweep, SweepMode
 
-logger = logging.getLogger(__name__)
+from NanoVNASaver.Touchstone import Touchstone
+import datetime
+import os
+import time
+import sys
+from gpiozero import Button, PWMOutputDevice
+from signal import pause
 
+# Pin definition
+DO_PIN = 2  # Digital output pin
+
+# Global variable
+high_count = 0
+
+# Set up GPIO mode
+try:
+    sensor = Button(DO_PIN)
+except Exception as e:
+    print(f"Error setting up GPIO: {e}")
+    sys.exit(1)
+    
+in1_motor1 = 5
+in2_motor1 = 6
+en_motor1 = 26
+in1_motor2 = 27
+in2_motor2 = 22
+en_motor2 = 17
+
+motor1_in1 = PWMOutputDevice(in1_motor1)
+motor1_in2 = PWMOutputDevice(in2_motor1)
+motor1_en = PWMOutputDevice(en_motor1)
+motor2_in1 = PWMOutputDevice(in1_motor2)
+motor2_in2 = PWMOutputDevice(in2_motor2)
+motor2_en = PWMOutputDevice(en_motor2)
+
+motor1_en.value = 1  # Enable motor 1
+motor2_en.value = 1  # Enable motor 2
+
+logger = logging.getLogger(__name__)
 
 def truncate(values: list[list[tuple]], count: int) -> list[list[tuple]]:
     """truncate drops extrema from data list if averaging is active"""
@@ -70,6 +108,13 @@ class SweepWorker(QtCore.QRunnable):
         self.running = False
         self.error_message = ""
         self.offsetDelay = 0
+        self.IRcount = 0  # Counter for sensor HIGH state
+        self.previous_state = False
+        self.sensor_thread = threading.Thread(target=self.sensor_monitor)
+        self.sensor_thread.daemon = True
+        self.sensor_thread.start()
+        # Sensor event handling
+        # sensor.when_pressed = self.increment_high_count
 
     @pyqtSlot()
     def run(self) -> None:
@@ -98,6 +143,10 @@ class SweepWorker(QtCore.QRunnable):
         if sweep != self.sweep:  # parameters changed
             self.sweep = sweep
             self.init_data()
+         
+        if sweep.properties.mode == SweepMode.CONTINOUS:
+            self.run_motor(1, 'backward')
+            self.run_motor(2, 'backward')
 
         self._run_loop()
 
@@ -113,8 +162,46 @@ class SweepWorker(QtCore.QRunnable):
         logger.debug('Sending "finished" signal')
         self.signals.finished.emit()
         self.running = False
+        
+        # Stop the motors
+        self.stop_motor(1)
+        self.stop_motor(2)
+        # self.IRcount = 0  # Reset Count to 0
 
-    def _run_loop(self) -> None:
+    def increment_high_count(self):
+        self.IRcount += 1
+        print(f"High count: {self.IRcount}")
+        self.trigger_save()
+      
+    def run_motor(self, motor, direction):
+        if motor == 1:
+            motor1_in1.value = 1 if direction == 'forward' else 0
+            motor1_in2.value = 0 if direction == 'forward' else 1
+        elif motor == 2:
+            motor2_in1.value = 1 if direction == 'forward' else 0
+            motor2_in2.value = 0 if direction == 'forward' else 1
+			
+    def stop_motor(self, motor):
+        if motor == 1:
+            motor1_in1.off()
+            motor1_in2.off()
+        elif motor == 2:
+            motor2_in1.off()
+            motor2_in2.off()
+            
+    def sensor_monitor(self):
+        while True:
+            if self.stopped:
+                break
+            current_state = sensor.is_pressed
+            if current_state and not self.previous_state:
+                self.IRcount += 1
+                print(f"High count: {self.IRcount}")
+                self.trigger_save()
+            self.previous_state = current_state
+            sleep(0.001)
+	  
+    def _run_loop(self, nr_params: int = 1) -> None:
         sweep = self.sweep
         averages = (
             sweep.properties.averages[0]
@@ -122,6 +209,9 @@ class SweepWorker(QtCore.QRunnable):
             else 1
         )
         logger.info("%d averages", averages)
+
+        last_save_pulses = 0 # Initialize the last save pulses
+        last_save_time = 0
 
         while True:
             for i in range(sweep.segments):
@@ -136,8 +226,72 @@ class SweepWorker(QtCore.QRunnable):
                 )
                 self.percentage = (i + 1) * 100 / sweep.segments
                 self.updateData(freq, values11, values21, i)
+
             if sweep.properties.mode != SweepMode.CONTINOUS or self.stopped:
                 break
+
+    def trigger_save(self, nr_params: int = 1) -> None:
+        sweep = self.sweep
+        if self.stopped:
+            return
+        pulse_count_threshold = sweep.properties.pulse_count
+        if sweep.properties.mode == SweepMode.CONTINOUS and self.IRcount % pulse_count_threshold == 0:
+			#Stop motor
+            self.stop_motor(1)
+            self.stop_motor(2)
+            
+            sleep(2)
+            
+			# Save S11 data (1-port)
+            ts_str1 = self.touchstoneString(1)
+            self.saveFile(ts_str1, "s1p")
+
+            # Save S21 data (2-port)
+            ts_str2 = self.touchstoneString(4)
+            self.saveFile(ts_str2, "s2p")
+            
+            sleep(2)
+            if not self.stopped:           
+				#Start motor
+                self.run_motor(1, 'backward')
+                self.run_motor(2, 'backward')
+
+    def touchstoneString(self, nr_params: int) -> str:
+        ts = Touchstone()
+        ts.sdata[0] = self.app.data.s11
+        if nr_params > 1:
+            ts.sdata[1] = self.app.data.s21
+            for dp in self.app.data.s11:
+                ts.sdata[2].append(Datapoint(dp.freq, 0, 0))
+                ts.sdata[3].append(Datapoint(dp.freq, 0, 0))
+
+        ts_str = "# HZ S RI R 50\n"
+        for i, dp_s11 in enumerate(ts.s11):
+            ts_str += f"{dp_s11.freq} {dp_s11.re} {dp_s11.im}"
+            for j in range(1, nr_params):
+                dp = ts.sdata[j][i]
+                if dp.freq != dp_s11.freq:
+                    raise LookupError("Frequencies of sdata not correlated")
+                ts_str += f" {dp.re} {dp.im}"
+            ts_str += "\n"
+        return ts_str
+
+    def saveFile(self, data_string, filename_suffix, directory="src/NanoVNASaver/data_files"):
+        # Ensure the directory exists
+        os.makedirs(directory, exist_ok=True)
+
+        # Create a timestamped filename
+        timestamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = os.path.join(directory, f"{timestamp}.{filename_suffix}")
+        print("Debug - Saving data to:", filename)  # Debugging output
+
+        # Write the data to the file
+        try:
+            with open(filename, 'w') as file:
+                file.write(data_string)
+            print(f"Data successfully saved to {filename}")
+        except Exception as e:
+            print(f"Failed to save data: {e}")
 
     def init_data(self):
         self.data11 = []

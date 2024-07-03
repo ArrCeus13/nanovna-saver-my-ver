@@ -36,6 +36,7 @@ class Properties(NamedTuple):
     mode: "SweepMode" = SweepMode.SINGLE
     averages: tuple[int, int] = (3, 0)
     logarithmic: bool = False
+    pulse_count: int = 10
 
 
 class Sweep:
@@ -133,6 +134,10 @@ class Sweep:
     def set_logarithmic(self, logarithmic: bool) -> None:
         with self._lock:
             self._properties = self.properties._replace(logarithmic=logarithmic)
+
+    def set_pulse_count(self, pulse_count: int) -> None:
+        with self._lock:
+            self._properties = self.properties._replace(pulse_count=pulse_count)
 
     def check(self):
         if (

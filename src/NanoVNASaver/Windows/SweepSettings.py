@@ -32,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class SweepSettingsWindow(QtWidgets.QWidget):
+    pulse_count_changed = QtCore.pyqtSignal(int)
     def __init__(self, app: QtWidgets.QWidget):
         super().__init__()
         self.app = app
@@ -102,6 +103,19 @@ class SweepSettingsWindow(QtWidgets.QWidget):
         sweep_btn_layout.addWidget(radio_button)
 
         layout.addRow(sweep_btn_layout)
+
+	    # Pulse Count Setting
+        pulse_count_label = QtWidgets.QLabel("Pulse Count for Auto Save:")
+        layout.addRow(pulse_count_label)
+        
+        self.pulse_count_input = QtWidgets.QSpinBox()
+        self.pulse_count_input.setMinimum(1)
+        self.pulse_count_input.setValue(self.app.sweep.properties.pulse_count)
+        self.pulse_count_input.setMinimumHeight(20)
+        self.pulse_count_input.valueChanged.connect(
+            lambda: self.update_pulse_count(self.pulse_count_input.value())
+        )
+        layout.addRow(self.pulse_count_input)
 
         # Log sweep
         label = QtWidgets.QLabel(
@@ -313,3 +327,8 @@ class SweepSettingsWindow(QtWidgets.QWidget):
     def update_tx_power(self, freq_range, power_desc):
         logger.debug("update_tx_power(%r)", power_desc)
         self.app.vna.setTXPower(freq_range, power_desc)
+
+    def update_pulse_count(self, pulse_count: int):
+        logger.debug("update_pulse_count(%s)", pulse_count)
+        self.app.sweep.set_pulse_count(pulse_count)
+        self.pulse_count_changed.emit(pulse_count)
